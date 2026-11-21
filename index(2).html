@@ -1,0 +1,611 @@
+<body>
+  <div class="app-shell">
+    <!-- Desktop Sidebar -->
+    <aside class="sidebar" aria-label="Primary Navigation">
+      <div>
+        <div class="brand-lockup">
+          <div class="brand-mark" aria-hidden="true">
+            <i data-lucide="shield-check" width="20" height="20"></i>
+          </div>
+          <span class="brand-title">MyVault</span>
+        </div>
+
+        <nav class="nav-list" id="desktopNav">
+          <button type="button" class="nav-item active" data-nav="dashboard">
+            <span class="nav-item-left"><i data-lucide="layout-dashboard" width="18" height="18"></i> Dashboard</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="files">
+            <span class="nav-item-left"><i data-lucide="folder-open" width="18" height="18"></i> File Manager</span>
+            <span class="nav-count" id="navCountFiles">0</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="videos">
+            <span class="nav-item-left"><i data-lucide="play-square" width="18" height="18"></i> Video Links</span>
+            <span class="nav-count" id="navCountVideos">0</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="passwords">
+            <span class="nav-item-left"><i data-lucide="key-round" width="18" height="18"></i> Passwords</span>
+            <span class="nav-count" id="navCountPasswords">0</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="notes">
+            <span class="nav-item-left"><i data-lucide="file-text" width="18" height="18"></i> Notes</span>
+            <span class="nav-count" id="navCountNotes">0</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="settings">
+            <span class="nav-item-left"><i data-lucide="settings" width="18" height="18"></i> Settings</span>
+          </button>
+        </nav>
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="storage-mini">
+          <div class="storage-mini-row">
+            <span class="storage-mini-label">Vault Storage</span>
+            <span class="storage-mini-val" id="sidebarStorageText">0 B</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-fill" id="sidebarStorageBar"></div>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Viewport Column -->
+    <div class="main-column">
+      <!-- Top Header -->
+      <header class="top-header">
+        <div class="mobile-brand">
+          <div class="mobile-brand-mark" aria-hidden="true">
+            <i data-lucide="shield-check" width="17" height="17"></i>
+          </div>
+          <span class="mobile-brand-name">MyVault</span>
+        </div>
+
+        <h1 class="desktop-page-title" id="headerPageTitle">Dashboard</h1>
+
+        <div class="global-search-wrap" id="globalSearchWrap">
+          <div class="search-input-box">
+            <i data-lucide="search" width="16" height="16"></i>
+            <input type="search" id="globalSearchInput" placeholder="Search files, links, passwords, notes..." aria-label="Global vault search" />
+            <button type="button" id="closeMobileSearch" class="icon-btn" style="min-width:28px;min-height:28px;display:none;" aria-label="Close search">
+              <i data-lucide="x" width="16" height="16"></i>
+            </button>
+          </div>
+        </div>
+
+        <div class="header-actions">
+          <button type="button" class="icon-btn" id="mobileSearchToggle" aria-label="Search vault">
+            <i data-lucide="search" width="20" height="20"></i>
+          </button>
+          <button type="button" class="icon-btn" id="mobileSettingsBtn" data-nav="settings" aria-label="Settings">
+            <i data-lucide="settings" width="20" height="20"></i>
+          </button>
+          <button type="button" class="btn-primary" id="headerQuickUploadBtn">
+            <i data-lucide="plus" width="16" height="16"></i>
+            <span>Upload</span>
+          </button>
+        </div>
+      </header>
+
+      <main class="content-area">
+        <!-- Global Search Results Banner (shown when global search has query) -->
+        <section id="globalSearchView" class="section-view" aria-label="Global Search Results">
+          <div class="view-header">
+            <div>
+              <h2 class="view-title">Search Results</h2>
+              <p class="view-subtitle" id="globalSearchSubtitle">Showing matches across your vault</p>
+            </div>
+            <button type="button" class="btn-secondary" id="clearGlobalSearchBtn">Clear Search</button>
+          </div>
+          <div id="globalSearchResults" class="cards-grid"></div>
+        </section>
+
+        <!-- 1. DASHBOARD -->
+        <section id="view-dashboard" class="section-view active" aria-label="Dashboard">
+          <div class="kpi-grid">
+            <div class="kpi-card">
+              <div class="kpi-top">
+                <span class="kpi-label">Total Saved Files</span>
+                <div class="kpi-icon blue"><i data-lucide="files" width="18" height="18"></i></div>
+              </div>
+              <div class="kpi-value" id="statTotalFiles">0</div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-top">
+                <span class="kpi-label">Total Photos</span>
+                <div class="kpi-icon cyan"><i data-lucide="image" width="18" height="18"></i></div>
+              </div>
+              <div class="kpi-value" id="statTotalPhotos">0</div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-top">
+                <span class="kpi-label">Total Videos</span>
+                <div class="kpi-icon purple"><i data-lucide="film" width="18" height="18"></i></div>
+              </div>
+              <div class="kpi-value" id="statTotalVideos">0</div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-top">
+                <span class="kpi-label">Total Documents</span>
+                <div class="kpi-icon indigo"><i data-lucide="file-text" width="18" height="18"></i></div>
+              </div>
+              <div class="kpi-value" id="statTotalDocs">0</div>
+            </div>
+          </div>
+
+          <div class="quick-actions-grid">
+            <button type="button" class="quick-action-btn" id="qaUploadFile">
+              <div class="quick-action-icon kpi-icon blue"><i data-lucide="upload" width="18" height="18"></i></div>
+              <span class="quick-action-text">Upload Files</span>
+            </button>
+            <button type="button" class="quick-action-btn" id="qaAddVideo">
+              <div class="quick-action-icon kpi-icon cyan"><i data-lucide="link" width="18" height="18"></i></div>
+              <span class="quick-action-text">Save Video URL</span>
+            </button>
+            <button type="button" class="quick-action-btn" id="qaAddPassword">
+              <div class="quick-action-icon kpi-icon purple"><i data-lucide="key-round" width="18" height="18"></i></div>
+              <span class="quick-action-text">Add Password</span>
+            </button>
+            <button type="button" class="quick-action-btn" id="qaNewNote">
+              <div class="quick-action-icon kpi-icon indigo"><i data-lucide="sticky-note" width="18" height="18"></i></div>
+              <span class="quick-action-text">Create Note</span>
+            </button>
+          </div>
+
+          <div class="dash-split">
+            <div class="card">
+              <div class="card-title-row">
+                <h2 class="card-title">Recently Added</h2>
+                <button type="button" class="action-chip-btn" data-nav="files">Open Files</button>
+              </div>
+              <div id="recentItemsList" class="list-stack"></div>
+            </div>
+
+            <div class="card">
+              <div class="card-title-row">
+                <h2 class="card-title">Storage Overview</h2>
+                <span class="storage-mini-val" id="dashStorageSummary">0 B used</span>
+              </div>
+              <div class="storage-bars" id="storageBreakdown"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 2. FILE MANAGER -->
+        <section id="view-files" class="section-view" aria-label="File Manager">
+          <div class="view-header">
+            <div>
+              <h2 class="view-title">File Manager</h2>
+              <p class="view-subtitle">Files are saved locally in IndexedDB and remain offline</p>
+            </div>
+            <button type="button" class="btn-primary" id="fileUploadBtn">
+              <i data-lucide="upload" width="16" height="16"></i>
+              <span>Upload Files</span>
+            </button>
+          </div>
+
+          <input type="file" id="hiddenFileInput" multiple hidden />
+
+          <div class="dropzone" id="fileDropzone" role="button" tabindex="0" aria-label="Upload files by clicking or dropping here">
+            <i data-lucide="cloud-upload" width="26" height="26" style="color: var(--accent-cyan);"></i>
+            <div class="dropzone-title">Tap to select files from device or drag and drop</div>
+            <div class="dropzone-sub">Automatically sorted into PDFs, Photos, Videos, Music, Documents &amp; Other</div>
+          </div>
+
+          <div class="toolbar">
+            <div class="segmented-tabs" id="fileCategoryTabs" role="tablist" aria-label="File Categories">
+              <button type="button" class="seg-tab active" data-cat="all">All</button>
+              <button type="button" class="seg-tab" data-cat="pdf">PDF Files</button>
+              <button type="button" class="seg-tab" data-cat="photos">Photos</button>
+              <button type="button" class="seg-tab" data-cat="videos">Videos</button>
+              <button type="button" class="seg-tab" data-cat="music">Music</button>
+              <button type="button" class="seg-tab" data-cat="documents">Documents</button>
+              <button type="button" class="seg-tab" data-cat="other">Other Files</button>
+            </div>
+
+            <div class="toolbar-controls">
+              <div class="search-input-box inline-search">
+                <i data-lucide="search" width="16" height="16"></i>
+                <input type="search" id="fileSearchInput" placeholder="Search files..." aria-label="Search files" />
+              </div>
+              <select id="fileSortSelect" class="select-control" aria-label="Sort files">
+                <option value="date-desc">Newest First</option>
+                <option value="date-asc">Oldest First</option>
+                <option value="name-asc">Name (A-Z)</option>
+                <option value="name-desc">Name (Z-A)</option>
+              </select>
+            </div>
+          </div>
+
+          <div id="filesGrid" class="cards-grid"></div>
+        </section>
+
+        <!-- 3. VIDEO LINK MANAGER -->
+        <section id="view-videos" class="section-view" aria-label="Video Link Manager">
+          <div class="view-header">
+            <div>
+              <h2 class="view-title">Video Link Manager</h2>
+              <p class="view-subtitle">Save YouTube, Facebook, TikTok, and web video URLs</p>
+            </div>
+            <button type="button" class="btn-primary" id="addVideoLinkBtn">
+              <i data-lucide="plus" width="16" height="16"></i>
+              <span>Add Video Link</span>
+            </button>
+          </div>
+
+          <div class="toolbar">
+            <div class="segmented-tabs" id="videoCategoryTabs" role="tablist" aria-label="Video Categories">
+              <button type="button" class="seg-tab active" data-vcat="all">All</button>
+              <button type="button" class="seg-tab" data-vcat="Watch Later">Watch Later</button>
+              <button type="button" class="seg-tab" data-vcat="Tutorials">Tutorials</button>
+              <button type="button" class="seg-tab" data-vcat="Entertainment">Entertainment</button>
+              <button type="button" class="seg-tab" data-vcat="Music">Music</button>
+              <button type="button" class="seg-tab" data-vcat="Inspiration">Inspiration</button>
+            </div>
+
+            <div class="toolbar-controls">
+              <div class="search-input-box inline-search">
+                <i data-lucide="search" width="16" height="16"></i>
+                <input type="search" id="videoSearchInput" placeholder="Search saved links..." aria-label="Search video links" />
+              </div>
+            </div>
+          </div>
+
+          <div id="videoLinksGrid" class="cards-grid"></div>
+        </section>
+
+        <!-- 4. PASSWORD MANAGER -->
+        <section id="view-passwords" class="section-view" aria-label="Password Manager">
+          <div class="view-header">
+            <div>
+              <h2 class="view-title">Password Manager</h2>
+              <p class="view-subtitle">Offline credential vault stored locally in IndexedDB</p>
+            </div>
+            <button type="button" class="btn-primary" id="addPasswordBtn">
+              <i data-lucide="plus" width="16" height="16"></i>
+              <span>Add Entry</span>
+            </button>
+          </div>
+
+          <div class="toolbar">
+            <div class="search-input-box inline-search" style="max-width: 420px;">
+              <i data-lucide="search" width="16" height="16"></i>
+              <input type="search" id="passwordSearchInput" placeholder="Search websites, usernames, or notes..." aria-label="Search passwords" />
+            </div>
+          </div>
+
+          <div id="passwordsGrid" class="cards-grid"></div>
+        </section>
+
+        <!-- 5. PERSONAL NOTES -->
+        <section id="view-notes" class="section-view" aria-label="Personal Notes">
+          <div class="view-header">
+            <div>
+              <h2 class="view-title">Personal Notes</h2>
+              <p class="view-subtitle">Changes save automatically as you type</p>
+            </div>
+            <button type="button" class="btn-primary" id="newNoteBtn">
+              <i data-lucide="plus" width="16" height="16"></i>
+              <span>New Note</span>
+            </button>
+          </div>
+
+          <div class="notes-layout">
+            <div class="notes-list-pane">
+              <div class="search-input-box">
+                <i data-lucide="search" width="16" height="16"></i>
+                <input type="search" id="noteSearchInput" placeholder="Search notes..." aria-label="Search notes" />
+              </div>
+              <div id="notesList"></div>
+            </div>
+
+            <div class="notes-editor-pane" id="noteEditorPane">
+              <input type="text" id="noteTitleInput" class="note-title-input" placeholder="Note title..." aria-label="Note title" />
+              <textarea id="noteBodyInput" class="note-body-textarea" placeholder="Start writing your note..." aria-label="Note content"></textarea>
+              <div class="note-status-bar">
+                <span id="noteSaveStatus">Select or create a note</span>
+                <button type="button" class="action-chip-btn danger" id="deleteActiveNoteBtn" style="display:none;">
+                  <i data-lucide="trash-2" width="15" height="15"></i>
+                  <span>Delete Note</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 6. SETTINGS -->
+        <section id="view-settings" class="section-view" aria-label="Settings">
+          <div class="view-header">
+            <div>
+              <h2 class="view-title">Settings &amp; Backup</h2>
+              <p class="view-subtitle">Manage preferences, export backups, and inspect local storage</p>
+            </div>
+          </div>
+
+          <div class="settings-grid">
+            <div class="card">
+              <h3 class="card-title" style="margin-bottom: 8px;">Appearance &amp; Preferences</h3>
+              <div class="setting-row">
+                <div>
+                  <div class="setting-info-title">Dark Navy Theme</div>
+                  <div class="setting-info-desc">High-contrast dark vault interface</div>
+                </div>
+                <span style="font-size: 0.8125rem; color: var(--accent-cyan); font-weight: 600;">Active</span>
+              </div>
+              <div class="setting-row">
+                <div>
+                  <div class="setting-info-title">Accent Highlight</div>
+                  <div class="setting-info-desc">Saved in LocalStorage preferences</div>
+                </div>
+                <select id="prefAccentSelect" class="select-control" aria-label="Accent color preference">
+                  <option value="blue">Neon Blue</option>
+                  <option value="cyan">Electric Cyan</option>
+                  <option value="purple">Royal Purple</option>
+                </select>
+              </div>
+              <div class="setting-row">
+                <div>
+                  <div class="setting-info-title">Default File Sort</div>
+                  <div class="setting-info-desc">Applied when opening File Manager</div>
+                </div>
+                <select id="prefDefaultSort" class="select-control" aria-label="Default file sort preference">
+                  <option value="date-desc">Newest First</option>
+                  <option value="date-asc">Oldest First</option>
+                  <option value="name-asc">Name (A-Z)</option>
+                  <option value="name-desc">Name (Z-A)</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="card">
+              <h3 class="card-title" style="margin-bottom: 8px;">Storage Information</h3>
+              <div class="setting-row">
+                <div>
+                  <div class="setting-info-title">IndexedDB Vault Usage</div>
+                  <div class="setting-info-desc" id="settingsRecordsSummary">0 files · 0 links · 0 passwords · 0 notes</div>
+                </div>
+                <span class="storage-mini-val" id="settingsVaultSize">0 B</span>
+              </div>
+              <div class="setting-row">
+                <div>
+                  <div class="setting-info-title">Browser Storage Quota</div>
+                  <div class="setting-info-desc" id="settingsQuotaDetail">Checking device browser storage...</div>
+                </div>
+                <span class="storage-mini-val" id="settingsQuotaPercent">—</span>
+              </div>
+              <div style="margin-top: 12px;">
+                <div class="progress-track">
+                  <div class="progress-fill" id="settingsQuotaBar"></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="card" style="grid-column: 1 / -1;">
+              <h3 class="card-title" style="margin-bottom: 8px;">Backup &amp; Data Management</h3>
+              <div class="setting-row">
+                <div>
+                  <div class="setting-info-title">Export Full Backup</div>
+                  <div class="setting-info-desc">Download all files, video links, passwords, notes, and settings as a single JSON archive</div>
+                </div>
+                <button type="button" class="btn-primary" id="exportBackupBtn">
+                  <i data-lucide="download" width="16" height="16"></i>
+                  <span>Export Backup</span>
+                </button>
+              </div>
+              <div class="setting-row">
+                <div>
+                  <div class="setting-info-title">Import Backup</div>
+                  <div class="setting-info-desc">Restore records and files from a MyVault JSON backup file</div>
+                </div>
+                <div>
+                  <input type="file" id="importBackupInput" accept=".json,application/json" hidden />
+                  <button type="button" class="btn-secondary" id="importBackupBtn">
+                    <i data-lucide="upload" width="16" height="16"></i>
+                    <span>Import Backup</span>
+                  </button>
+                </div>
+              </div>
+              <div class="setting-row">
+                <div>
+                  <div class="setting-info-title">Clear All Vault Data</div>
+                  <div class="setting-info-desc">Permanently erase all stored files, links, passwords, and notes from this browser</div>
+                </div>
+                <button type="button" class="btn-danger" id="clearAllDataBtn">
+                  <i data-lucide="trash-2" width="16" height="16"></i>
+                  <span>Clear All Data</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <!-- Mobile Fixed Bottom Navigation -->
+    <nav class="mobile-bottom-nav" id="mobileBottomNav" aria-label="Mobile Navigation">
+      <button type="button" class="mobile-tab-btn active" data-nav="dashboard">
+        <i data-lucide="layout-dashboard" width="20" height="20"></i>
+        <span>Home</span>
+      </button>
+      <button type="button" class="mobile-tab-btn" data-nav="files">
+        <i data-lucide="folder-open" width="20" height="20"></i>
+        <span>Files</span>
+      </button>
+      <button type="button" class="mobile-tab-btn" data-nav="videos">
+        <i data-lucide="play-square" width="20" height="20"></i>
+        <span>Videos</span>
+      </button>
+      <button type="button" class="mobile-tab-btn" data-nav="passwords">
+        <i data-lucide="key-round" width="20" height="20"></i>
+        <span>Passwords</span>
+      </button>
+      <button type="button" class="mobile-tab-btn" data-nav="notes">
+        <i data-lucide="file-text" width="20" height="20"></i>
+        <span>Notes</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- Toast Container -->
+  <div class="toast-region" id="toastRegion" aria-live="polite"></div>
+
+  <!-- File Preview Modal -->
+  <div class="modal-backdrop" id="previewModal" role="dialog" aria-modal="true" aria-labelledby="previewModalTitle">
+    <div class="modal-panel modal-lg">
+      <div class="modal-header">
+        <h3 class="modal-title" id="previewModalTitle">File Preview</h3>
+        <button type="button" class="icon-btn" data-close-modal="previewModal" aria-label="Close preview">
+          <i data-lucide="x" width="20" height="20"></i>
+        </button>
+      </div>
+      <div class="modal-body">
+        <div class="preview-container" id="previewContainer"></div>
+        <div id="previewMeta" style="font-size: 0.8125rem; color: var(--text-secondary);"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn-secondary" data-close-modal="previewModal">Close</button>
+        <button type="button" class="btn-primary" id="previewDownloadBtn">
+          <i data-lucide="download" width="16" height="16"></i>
+          <span>Download</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Rename File Modal -->
+  <div class="modal-backdrop" id="renameModal" role="dialog" aria-modal="true" aria-labelledby="renameModalTitle">
+    <div class="modal-panel">
+      <div class="modal-header">
+        <h3 class="modal-title" id="renameModalTitle">Rename File</h3>
+        <button type="button" class="icon-btn" data-close-modal="renameModal" aria-label="Close">
+          <i data-lucide="x" width="20" height="20"></i>
+        </button>
+      </div>
+      <form id="renameForm">
+        <div class="modal-body">
+          <div class="form-group">
+            <label class="form-label" for="renameFileInput">File Name</label>
+            <input type="text" id="renameFileInput" class="form-input" required />
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="renameCategorySelect">Category</label>
+            <select id="renameCategorySelect" class="form-select">
+              <option value="pdf">PDF Files</option>
+              <option value="photos">Photos</option>
+              <option value="videos">Videos</option>
+              <option value="music">Music</option>
+              <option value="documents">Documents</option>
+              <option value="other">Other Files</option>
+            </select>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn-secondary" data-close-modal="renameModal">Cancel</button>
+          <button type="submit" class="btn-primary">Save Changes</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Video Link Modal -->
+  <div class="modal-backdrop" id="videoModal" role="dialog" aria-modal="true" aria-labelledby="videoModalTitle">
+    <div class="modal-panel">
+      <div class="modal-header">
+        <h3 class="modal-title" id="videoModalTitle">Save Video Link</h3>
+        <button type="button" class="icon-btn" data-close-modal="videoModal" aria-label="Close">
+          <i data-lucide="x" width="20" height="20"></i>
+        </button>
+      </div>
+      <form id="videoForm">
+        <div class="modal-body">
+          <div class="form-group">
+            <label class="form-label" for="videoUrlInput">Video URL</label>
+            <input type="url" id="videoUrlInput" class="form-input" placeholder="https://www.youtube.com/watch?v=..." required />
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="videoTitleInput">Custom Title</label>
+            <input type="text" id="videoTitleInput" class="form-input" placeholder="e.g. Design System Crash Course" required />
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="videoCategoryInput">Category</label>
+            <select id="videoCategoryInput" class="form-select">
+              <option value="Watch Later">Watch Later</option>
+              <option value="Tutorials">Tutorials</option>
+              <option value="Entertainment">Entertainment</option>
+              <option value="Music">Music</option>
+              <option value="Inspiration">Inspiration</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="videoDescInput">Description (optional)</label>
+            <textarea id="videoDescInput" class="form-textarea" placeholder="Why you saved this video or timestamp notes..."></textarea>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn-secondary" data-close-modal="videoModal">Cancel</button>
+          <button type="submit" class="btn-primary">Save Link</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Password Modal -->
+  <div class="modal-backdrop" id="passwordModal" role="dialog" aria-modal="true" aria-labelledby="passwordModalTitle">
+    <div class="modal-panel">
+      <div class="modal-header">
+        <h3 class="modal-title" id="passwordModalTitle">Add Password Entry</h3>
+        <button type="button" class="icon-btn" data-close-modal="passwordModal" aria-label="Close">
+          <i data-lucide="x" width="20" height="20"></i>
+        </button>
+      </div>
+      <form id="passwordForm">
+        <div class="modal-body">
+          <div class="form-group">
+            <label class="form-label" for="pwSiteInput">Website / Service Name</label>
+            <input type="text" id="pwSiteInput" class="form-input" placeholder="e.g. GitHub" required />
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="pwUsernameInput">Username or Email</label>
+            <input type="text" id="pwUsernameInput" class="form-input" placeholder="you@example.com" required />
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="pwSecretInput">Password</label>
+            <div class="input-with-btn">
+              <input type="text" id="pwSecretInput" class="form-input" style="font-family: var(--font-mono);" placeholder="Enter or generate password" required />
+              <button type="button" class="btn-secondary" id="generatePwBtn" title="Generate strong password">Generate</button>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="pwNotesInput">Notes (optional)</label>
+            <textarea id="pwNotesInput" class="form-textarea" placeholder="2FA recovery info or account notes..."></textarea>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn-secondary" data-close-modal="passwordModal">Cancel</button>
+          <button type="submit" class="btn-primary">Save Password</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Confirmation Modal -->
+  <div class="modal-backdrop" id="confirmModal" role="dialog" aria-modal="true" aria-labelledby="confirmModalTitle">
+    <div class="modal-panel">
+      <div class="modal-header">
+        <h3 class="modal-title" id="confirmModalTitle">Confirm Action</h3>
+        <button type="button" class="icon-btn" data-close-modal="confirmModal" aria-label="Close">
+          <i data-lucide="x" width="20" height="20"></i>
+        </button>
+      </div>
+      <div class="modal-body">
+        <p id="confirmModalMessage" style="color: var(--text-secondary); font-size: 0.9375rem;"></p>
+        <div class="form-group" id="confirmTypeGroup" style="display:none;">
+          <label class="form-label" for="confirmTypeInput">Type CLEAR to confirm</label>
+          <input type="text" id="confirmTypeInput" class="form-input" placeholder="CLEAR" autocomplete="off" />
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn-secondary" data-close-modal="confirmModal">Cancel</button>
+        <button type="button" class="btn-danger" id="confirmExecuteBtn">Confirm</button>
+      </div>
+    </div>
+  </div>

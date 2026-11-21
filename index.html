@@ -1,0 +1,1753 @@
+  <script>
+    (function () {
+      'use strict';
+
+      /* =========================================================
+         1. CONSTANTS & PREFERENCES (LocalStorage ONLY for simple prefs)
+      ========================================================= */
+      const DB_NAME = 'MyVaultDB';
+      const DB_VERSION = 1;
+      const PREF_KEY = 'myvault_prefs_v1';
+
+      const FILE_CATEGORIES = {
+        pdf: 'PDF Files',
+        photos: 'Photos',
+        videos: 'Videos',
+        music: 'Music',
+        documents: 'Documents',
+        other: 'Other Files'
+      };
+
+      const defaultPrefs = {
+        accent: 'blue',
+        defaultSort: 'date-desc',
+        lastView: 'dashboard'
+      };
+
+      function loadPrefs() {
+        try {
+          const raw = localStorage.getItem(PREF_KEY);
+          if (!raw) return { ...defaultPrefs };
+          return { ...defaultPrefs, ...JSON.parse(raw) };
+        } catch {
+          return { ...defaultPrefs };
+        }
+      }
+
+      function savePrefs(prefs) {
+        try {
+          localStorage.setItem(PREF_KEY, JSON.stringify(prefs));
+        } catch (err) {
+          console.warn('Could not save preferences:', err);
+        }
+      }
+
+      /* =========================================================
+         2. STATE
+      ========================================================= */
+      const state = {
+        prefs: loadPrefs(),
+        currentView: 'dashboard',
+        files: [],
+        videoLinks: [],
+        passwords: [],
+        notes: [],
+        fileCategory: 'all',
+        fileSearch: '',
+        fileSort: 'date-desc',
+        videoCategory: 'all',
+        videoSearch: '',
+        passwordSearch: '',
+        revealedPasswords: new Set(),
+        noteSearch: '',
+        activeNoteId: null,
+        noteSaveTimer: null,
+        editingVideoId: null,
+        editingPasswordId: null,
+        renamingFileId: null,
+        previewObjectUrl: null,
+        previewFile: null,
+        thumbUrls: new Map(),
+        confirmHandler: null,
+        confirmRequireText: false
+      };
+
+      state.fileSort = state.prefs.defaultSort || 'date-desc';
+
+      /* =========================================================
+         3. INDEXEDDB STORAGE ENGINE
+      ========================================================= */
+      let dbInstance = null;
+
+      function openVaultDB() {
+        if (dbInstance) return Promise.resolve(dbInstance);
+        return new Promise((resolve, reject) => {
+          if (!('indexedDB' in window)) {
+            reject(new Error('IndexedDB is not supported in this browser.'));
+            return;
+          }
+          const req = indexedDB.open(DB_NAME, DB_VERSION);
+          req.onupgradeneeded = (e) => {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains('files')) {
+              const fs = db.createObjectStore('files', { keyPath: 'id' });
+              fs.createIndex('category', 'category', { unique: false });
+              fs.createIndex('createdAt', 'createdAt', { unique: false });
+              fs.createIndex('name', 'name', { unique: false });
+            }
+            if (!db.objectStoreNames.contains('videoLinks')) {
+              const vs = db.createObjectStore('videoLinks', { keyPath: 'id' });
+              vs.createIndex('category', 'category', { unique: false });
+              vs.createIndex('createdAt', 'createdAt', { unique: false });
+            }
+            if (!db.objectStoreNames.contains('passwords')) {
+              const ps = db.createObjectStore('passwords', { keyPath: 'id' });
+              ps.createIndex('site', 'site', { unique: false });
+              ps.createIndex('createdAt', 'createdAt', { unique: false });
+            }
+            if (!db.objectStoreNames.contains('notes')) {
+              const ns = db.createObjectStore('notes', { keyPath: 'id' });
+              ns.createIndex('updatedAt', 'updatedAt', { unique: false });
+            }
+          };
+          req.onsuccess = () => {
+            dbInstance = req.result;
+            dbInstance.onversionchange = () => {
+              dbInstance.close();
+              dbInstance = null;
+            };
+            resolve(dbInstance);
+          };
+          req.onerror = () => reject(req.error || new Error('Failed to open IndexedDB'));
+        });
+      }
+
+      async function dbGetAll(storeName) {
+        const db = await openVaultDB();
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(storeName, 'readonly');
+          const req = tx.objectStore(storeName).getAll();
+          req.onsuccess = () => resolve(req.result || []);
+          req.onerror = () => reject(req.error);
+        });
+      }
+
+      async function dbPut(storeName, record) {
+        const db = await openVaultDB();
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(storeName, 'readwrite');
+          tx.oncomplete = () => resolve(record);
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error || new Error('Transaction aborted'));
+          tx.objectStore(storeName).put(record);
+        });
+      }
+
+      async function dbDelete(storeName, id) {
+        const db = await openVaultDB();
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(storeName, 'readwrite');
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.objectStore(storeName).delete(id);
+        });
+      }
+
+      async function dbClearStore(storeName) {
+        const db = await openVaultDB();
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(storeName, 'readwrite');
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.objectStore(storeName).clear();
+        });
+      }
+
+      function handleStorageError(err, actionLabel) {
+        console.error(err);
+        if (err && (err.name === 'QuotaExceededError' || (err.message && err.message.toLowerCase().includes('quota')))) {
+          showToast('Storage quota exceeded! Delete unused files or clear space to save more.', 'error');
+        } else {
+          showToast(`Failed to ${actionLabel}: ${err?.message || 'Storage error'}`, 'error');
+        }
+      }
+
+      /* =========================================================
+         4. UTILITIES (Safe Escaping, Formatting, Classification)
+      ========================================================= */
+      function generateId(prefix) {
+        if (window.crypto && typeof crypto.randomUUID === 'function') {
+          return `${prefix}_${crypto.randomUUID()}`;
+        }
+        return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+      }
+
+      function escapeHtml(str) {
+        return String(str ?? '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      }
+
+      function isSafeHttpUrl(rawUrl) {
+        try {
+          const parsed = new URL(rawUrl);
+          return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+        } catch {
+          return false;
+        }
+      }
+
+      function formatBytes(bytes) {
+        if (!bytes || bytes <= 0) return '0 B';
+        const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+        const val = bytes / Math.pow(1024, i);
+        return `${val >= 100 || i === 0 ? Math.round(val) : val.toFixed(1)} ${units[i]}`;
+      }
+
+      function formatDate(ts) {
+        if (!ts) return '';
+        const d = new Date(ts);
+        return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+      }
+
+      function formatTime(ts) {
+        if (!ts) return '';
+        return new Date(ts).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+      }
+
+      function detectFileCategory(file) {
+        const mime = (file.type || '').toLowerCase();
+        const name = (file.name || '').toLowerCase();
+        const ext = name.includes('.') ? name.split('.').pop() : '';
+
+        if (mime === 'application/pdf' || ext === 'pdf') return 'pdf';
+        if (mime.startsWith('image/') || ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'heic', 'avif'].includes(ext)) return 'photos';
+        if (mime.startsWith('video/') || ['mp4', 'webm', 'mov', 'mkv', 'avi', 'm4v'].includes(ext)) return 'videos';
+        if (mime.startsWith('audio/') || ['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac', 'opus'].includes(ext)) return 'music';
+        if (
+          mime.startsWith('text/') ||
+          mime.includes('word') ||
+          mime.includes('document') ||
+          mime.includes('spreadsheet') ||
+          mime.includes('presentation') ||
+          ['doc', 'docx', 'txt', 'md', 'rtf', 'csv', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'json'].includes(ext)
+        ) {
+          return 'documents';
+        }
+        return 'other';
+      }
+
+      function detectVideoPlatform(url) {
+        const lower = url.toLowerCase();
+        if (lower.includes('youtube.com') || lower.includes('youtu.be')) return 'YouTube';
+        if (lower.includes('facebook.com') || lower.includes('fb.watch')) return 'Facebook';
+        if (lower.includes('tiktok.com')) return 'TikTok';
+        if (lower.includes('vimeo.com')) return 'Vimeo';
+        if (lower.includes('instagram.com')) return 'Instagram';
+        return 'Web Video';
+      }
+
+      function getCategoryIconName(category) {
+        switch (category) {
+          case 'pdf': return 'file-text';
+          case 'photos': return 'image';
+          case 'videos': return 'film';
+          case 'music': return 'music';
+          case 'documents': return 'file-spreadsheet';
+          default: return 'file';
+        }
+      }
+
+      const SVG_FALLBACKS = {
+        'layout-dashboard': '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>',
+        'folder-open': '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/></svg>',
+        'play-square': '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="m10 8 6 4-6 4Z"/></svg>',
+        'key-round': '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg>',
+        'file-text': '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>',
+        'settings': '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>',
+        'file': '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></svg>'
+      };
+
+      function refreshIcons() {
+        if (window.lucide && typeof window.lucide.createIcons === 'function') {
+          window.lucide.createIcons();
+        } else {
+          document.querySelectorAll('i[data-lucide]').forEach((el) => {
+            if (!el.innerHTML.trim()) {
+              const name = el.getAttribute('data-lucide');
+              el.innerHTML = SVG_FALLBACKS[name] || SVG_FALLBACKS['file'];
+            }
+          });
+        }
+      }
+
+      function showToast(message, type = 'info') {
+        const region = document.getElementById('toastRegion');
+        const toast = document.createElement('div');
+        toast.className = `toast ${type}`;
+        const span = document.createElement('span');
+        span.textContent = message;
+        const closeBtn = document.createElement('button');
+        closeBtn.type = 'button';
+        closeBtn.textContent = 'Dismiss';
+        closeBtn.style.cssText = 'color: var(--text-secondary); font-size: 0.75rem; flex-shrink: 0;';
+        closeBtn.addEventListener('click', () => toast.remove());
+        toast.appendChild(span);
+        toast.appendChild(closeBtn);
+        region.appendChild(toast);
+        setTimeout(() => {
+          if (toast.parentNode) toast.remove();
+        }, 4200);
+      }
+
+      /* =========================================================
+         5. MODAL HELPERS
+      ========================================================= */
+      function openModal(id) {
+        const el = document.getElementById(id);
+        if (el) el.classList.add('open');
+      }
+
+      function closeModal(id) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.classList.remove('open');
+        if (id === 'previewModal') {
+          const container = document.getElementById('previewContainer');
+          container.innerHTML = '';
+          if (state.previewObjectUrl) {
+            URL.revokeObjectURL(state.previewObjectUrl);
+            state.previewObjectUrl = null;
+          }
+          state.previewFile = null;
+        }
+      }
+
+      function openConfirm({ title, message, confirmLabel = 'Confirm', requireClearText = false, onConfirm }) {
+        document.getElementById('confirmModalTitle').textContent = title;
+        document.getElementById('confirmModalMessage').textContent = message;
+        document.getElementById('confirmExecuteBtn').textContent = confirmLabel;
+        const group = document.getElementById('confirmTypeGroup');
+        const input = document.getElementById('confirmTypeInput');
+        input.value = '';
+        group.style.display = requireClearText ? 'flex' : 'none';
+        state.confirmRequireText = requireClearText;
+        state.confirmHandler = onConfirm;
+        openModal('confirmModal');
+      }
+
+      /* =========================================================
+         6. NAVIGATION & GLOBAL SEARCH
+      ========================================================= */
+      const VIEW_TITLES = {
+        dashboard: 'Dashboard',
+        files: 'File Manager',
+        videos: 'Video Links',
+        passwords: 'Password Manager',
+        notes: 'Personal Notes',
+        settings: 'Settings & Backup'
+      };
+
+      function switchView(view) {
+        if (!VIEW_TITLES[view]) view = 'dashboard';
+        state.currentView = view;
+        state.prefs.lastView = view;
+        savePrefs(state.prefs);
+
+        // Clear global search view if active
+        document.getElementById('globalSearchView').classList.remove('active');
+        document.querySelectorAll('.section-view[id^="view-"]').forEach((sec) => {
+          sec.classList.toggle('active', sec.id === `view-${view}`);
+        });
+
+        document.querySelectorAll('[data-nav]').forEach((btn) => {
+          btn.classList.toggle('active', btn.dataset.nav === view);
+        });
+
+        document.getElementById('headerPageTitle').textContent = VIEW_TITLES[view];
+
+        if (view === 'settings') {
+          updateStorageInfo();
+        }
+        refreshIcons();
+      }
+
+      function renderGlobalSearch(query) {
+        const q = query.trim().toLowerCase();
+        const searchView = document.getElementById('globalSearchView');
+        if (!q) {
+          searchView.classList.remove('active');
+          switchView(state.currentView);
+          return;
+        }
+
+        document.querySelectorAll('.section-view[id^="view-"]').forEach((s) => s.classList.remove('active'));
+        searchView.classList.add('active');
+
+        const matches = [];
+        state.files.forEach((f) => {
+          if (f.name.toLowerCase().includes(q) || (FILE_CATEGORIES[f.category] || '').toLowerCase().includes(q)) {
+            matches.push({ kind: 'file', item: f });
+          }
+        });
+        state.videoLinks.forEach((v) => {
+          if (v.title.toLowerCase().includes(q) || v.url.toLowerCase().includes(q) || (v.description || '').toLowerCase().includes(q)) {
+            matches.push({ kind: 'video', item: v });
+          }
+        });
+        state.passwords.forEach((p) => {
+          if (p.site.toLowerCase().includes(q) || p.username.toLowerCase().includes(q) || (p.notes || '').toLowerCase().includes(q)) {
+            matches.push({ kind: 'password', item: p });
+          }
+        });
+        state.notes.forEach((n) => {
+          if ((n.title || '').toLowerCase().includes(q) || (n.content || '').toLowerCase().includes(q)) {
+            matches.push({ kind: 'note', item: n });
+          }
+        });
+
+        document.getElementById('globalSearchSubtitle').textContent = `${matches.length} result${matches.length === 1 ? '' : 's'} for "${query}"`;
+        const grid = document.getElementById('globalSearchResults');
+
+        if (matches.length === 0) {
+          grid.innerHTML = `
+            <div class="card empty-state" style="grid-column: 1 / -1;">
+              <div class="empty-state-icon"><i data-lucide="search-x" width="22" height="22"></i></div>
+              <div class="empty-state-title">No matching items</div>
+              <div class="empty-state-desc">Try a different keyword across files, video links, passwords, or notes.</div>
+            </div>`;
+          refreshIcons();
+          return;
+        }
+
+        grid.innerHTML = matches.map(({ kind, item }) => {
+          if (kind === 'file') {
+            return `
+              <div class="file-card">
+                <div class="file-card-head">
+                  <div class="item-thumb"><i data-lucide="${getCategoryIconName(item.category)}" width="18" height="18"></i></div>
+                  <div class="item-info">
+                    <div class="item-title">${escapeHtml(item.name)}</div>
+                    <div class="item-meta">File · ${escapeHtml(FILE_CATEGORIES[item.category] || 'File')} · ${formatBytes(item.size)}</div>
+                  </div>
+                </div>
+                <div class="file-card-actions">
+                  <button type="button" class="action-chip-btn" data-action="preview-file" data-id="${escapeHtml(item.id)}">Preview</button>
+                  <button type="button" class="action-chip-btn" data-action="download-file" data-id="${escapeHtml(item.id)}">Download</button>
+                </div>
+              </div>`;
+          }
+          if (kind === 'video') {
+            const safeUrl = isSafeHttpUrl(item.url) ? escapeHtml(item.url) : '#';
+            return `
+              <div class="file-card">
+                <div class="file-card-head">
+                  <div class="item-thumb"><i data-lucide="play-square" width="18" height="18"></i></div>
+                  <div class="item-info">
+                    <div class="item-title">${escapeHtml(item.title)}</div>
+                    <div class="item-meta">Video Link · ${escapeHtml(item.platform)} · ${escapeHtml(item.category)}</div>
+                  </div>
+                </div>
+                <div class="file-card-actions">
+                  <a href="${safeUrl}" target="_blank" rel="noopener noreferrer" class="action-chip-btn">Open Tab</a>
+                </div>
+              </div>`;
+          }
+          if (kind === 'password') {
+            return `
+              <div class="file-card">
+                <div class="file-card-head">
+                  <div class="item-thumb"><i data-lucide="key-round" width="18" height="18"></i></div>
+                  <div class="item-info">
+                    <div class="item-title">${escapeHtml(item.site)}</div>
+                    <div class="item-meta">Password · ${escapeHtml(item.username)}</div>
+                  </div>
+                </div>
+                <div class="file-card-actions">
+                  <button type="button" class="action-chip-btn" data-action="copy-pw" data-id="${escapeHtml(item.id)}">Copy Password</button>
+                </div>
+              </div>`;
+          }
+          return `
+            <div class="file-card">
+              <div class="file-card-head">
+                <div class="item-thumb"><i data-lucide="file-text" width="18" height="18"></i></div>
+                <div class="item-info">
+                  <div class="item-title">${escapeHtml(item.title || 'Untitled Note')}</div>
+                  <div class="item-meta">Note · Updated ${formatDate(item.updatedAt)}</div>
+                </div>
+              </div>
+              <div class="file-card-actions">
+                <button type="button" class="action-chip-btn" data-action="open-note" data-id="${escapeHtml(item.id)}">Open Note</button>
+              </div>
+            </div>`;
+        }).join('');
+        refreshIcons();
+      }
+
+      /* =========================================================
+         7. RENDERING FUNCTIONS
+      ========================================================= */
+      function getThumbUrl(file) {
+        if (file.category !== 'photos' || !file.blob) return null;
+        if (state.thumbUrls.has(file.id)) return state.thumbUrls.get(file.id);
+        const url = URL.createObjectURL(file.blob);
+        state.thumbUrls.set(file.id, url);
+        return url;
+      }
+
+      function revokeAllThumbUrls() {
+        state.thumbUrls.forEach((url) => URL.revokeObjectURL(url));
+        state.thumbUrls.clear();
+      }
+
+      function renderCounts() {
+        document.getElementById('navCountFiles').textContent = state.files.length;
+        document.getElementById('navCountVideos').textContent = state.videoLinks.length;
+        document.getElementById('navCountPasswords').textContent = state.passwords.length;
+        document.getElementById('navCountNotes').textContent = state.notes.length;
+      }
+
+      function renderDashboard() {
+        const totalFiles = state.files.length;
+        const totalPhotos = state.files.filter((f) => f.category === 'photos').length;
+        const totalVideos = state.files.filter((f) => f.category === 'videos').length;
+        const totalDocs = state.files.filter((f) => f.category === 'documents' || f.category === 'pdf').length;
+
+        document.getElementById('statTotalFiles').textContent = totalFiles;
+        document.getElementById('statTotalPhotos').textContent = totalPhotos;
+        document.getElementById('statTotalVideos').textContent = totalVideos;
+        document.getElementById('statTotalDocs').textContent = totalDocs;
+
+        // Recent items across all vault sections
+        const combined = [
+          ...state.files.map((f) => ({ type: 'file', ts: f.createdAt, title: f.name, sub: `${FILE_CATEGORIES[f.category]} · ${formatBytes(f.size)}`, id: f.id, icon: getCategoryIconName(f.category), thumb: getThumbUrl(f) })),
+          ...state.videoLinks.map((v) => ({ type: 'video', ts: v.createdAt, title: v.title, sub: `${v.platform} · ${v.category}`, id: v.id, icon: 'play-square', url: v.url })),
+          ...state.passwords.map((p) => ({ type: 'password', ts: p.createdAt, title: p.site, sub: p.username, id: p.id, icon: 'key-round' })),
+          ...state.notes.map((n) => ({ type: 'note', ts: n.updatedAt || n.createdAt, title: n.title || 'Untitled Note', sub: 'Personal Note', id: n.id, icon: 'file-text' }))
+        ].sort((a, b) => (b.ts || 0) - (a.ts || 0)).slice(0, 6);
+
+        const recentContainer = document.getElementById('recentItemsList');
+        if (combined.length === 0) {
+          recentContainer.innerHTML = `
+            <div class="empty-state" style="padding: 28px 12px;">
+              <div class="empty-state-icon"><i data-lucide="inbox" width="22" height="22"></i></div>
+              <div class="empty-state-title">Your vault is empty</div>
+              <div class="empty-state-desc">Upload a file, save a video link, store a password, or write your first note.</div>
+            </div>`;
+        } else {
+          recentContainer.innerHTML = combined.map((item) => {
+            const thumbHtml = item.thumb
+              ? `<img src="${item.thumb}" alt="" />`
+              : `<i data-lucide="${item.icon}" width="18" height="18"></i>`;
+
+            let actionBtn = '';
+            if (item.type === 'file') {
+              actionBtn = `<button type="button" class="action-chip-btn" data-action="preview-file" data-id="${escapeHtml(item.id)}">Open</button>`;
+            } else if (item.type === 'video' && isSafeHttpUrl(item.url)) {
+              actionBtn = `<a href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer" class="action-chip-btn">Watch</a>`;
+            } else if (item.type === 'password') {
+              actionBtn = `<button type="button" class="action-chip-btn" data-action="copy-pw" data-id="${escapeHtml(item.id)}">Copy</button>`;
+            } else if (item.type === 'note') {
+              actionBtn = `<button type="button" class="action-chip-btn" data-action="open-note" data-id="${escapeHtml(item.id)}">Edit</button>`;
+            }
+
+            return `
+              <div class="list-row">
+                <div class="list-row-left">
+                  <div class="item-thumb">${thumbHtml}</div>
+                  <div class="item-info">
+                    <div class="item-title">${escapeHtml(item.title)}</div>
+                    <div class="item-meta">${escapeHtml(item.sub)} · ${formatDate(item.ts)}</div>
+                  </div>
+                </div>
+                ${actionBtn}
+              </div>`;
+          }).join('');
+        }
+
+        // Storage Breakdown
+        const catTotals = { pdf: 0, photos: 0, videos: 0, music: 0, documents: 0, other: 0 };
+        let totalBytes = 0;
+        state.files.forEach((f) => {
+          const sz = Number(f.size) || 0;
+          totalBytes += sz;
+          if (catTotals[f.category] !== undefined) catTotals[f.category] += sz;
+          else catTotals.other += sz;
+        });
+
+        document.getElementById('dashStorageSummary').textContent = `${formatBytes(totalBytes)} files`;
+        const breakdownEl = document.getElementById('storageBreakdown');
+        breakdownEl.innerHTML = Object.entries(FILE_CATEGORIES).map(([key, label]) => {
+          const sz = catTotals[key] || 0;
+          const pct = totalBytes > 0 ? Math.max(sz > 0 ? 4 : 0, Math.round((sz / totalBytes) * 100)) : 0;
+          return `
+            <div class="storage-cat-row">
+              <div class="storage-cat-meta">
+                <span class="storage-cat-name">${escapeHtml(label)}</span>
+                <span class="storage-cat-size">${formatBytes(sz)}</span>
+              </div>
+              <div class="progress-track">
+                <div class="progress-fill" style="width: ${pct}%;"></div>
+              </div>
+            </div>`;
+        }).join('');
+
+        updateStorageInfo();
+        refreshIcons();
+      }
+
+      function renderFiles() {
+        const grid = document.getElementById('filesGrid');
+        const q = state.fileSearch.trim().toLowerCase();
+
+        let filtered = state.files.filter((f) => {
+          const matchCat = state.fileCategory === 'all' || f.category === state.fileCategory;
+          const matchSearch = !q || f.name.toLowerCase().includes(q) || (f.mimeType || '').toLowerCase().includes(q);
+          return matchCat && matchSearch;
+        });
+
+        filtered.sort((a, b) => {
+          if (state.fileSort === 'date-desc') return (b.createdAt || 0) - (a.createdAt || 0);
+          if (state.fileSort === 'date-asc') return (a.createdAt || 0) - (b.createdAt || 0);
+          if (state.fileSort === 'name-asc') return a.name.localeCompare(b.name);
+          if (state.fileSort === 'name-desc') return b.name.localeCompare(a.name);
+          return 0;
+        });
+
+        if (filtered.length === 0) {
+          grid.innerHTML = `
+            <div class="card empty-state" style="grid-column: 1 / -1;">
+              <div class="empty-state-icon"><i data-lucide="folder-open" width="22" height="22"></i></div>
+              <div class="empty-state-title">${state.files.length === 0 ? 'No files saved yet' : 'No matching files'}</div>
+              <div class="empty-state-desc">${state.files.length === 0 ? 'Upload PDFs, photos, videos, music, or documents directly from your device.' : 'Adjust your category filter or search query.'}</div>
+            </div>`;
+          refreshIcons();
+          return;
+        }
+
+        grid.innerHTML = filtered.map((file) => {
+          const thumb = getThumbUrl(file);
+          const previewVisual = thumb
+            ? `<img src="${thumb}" alt="${escapeHtml(file.name)}" />`
+            : `<i data-lucide="${getCategoryIconName(file.category)}" width="22" height="22"></i>`;
+
+          return `
+            <article class="file-card">
+              <div class="file-card-head">
+                <div class="file-card-preview" data-action="preview-file" data-id="${escapeHtml(file.id)}" title="Preview file">
+                  ${previewVisual}
+                </div>
+                <div class="item-info">
+                  <div class="item-title" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</div>
+                  <div class="item-meta">${escapeHtml(FILE_CATEGORIES[file.category] || 'Other')} · ${formatBytes(file.size)} · ${formatDate(file.createdAt)}</div>
+                </div>
+              </div>
+              <div class="file-card-actions">
+                <button type="button" class="action-chip-btn" data-action="preview-file" data-id="${escapeHtml(file.id)}" title="Preview">
+                  <i data-lucide="eye" width="15" height="15"></i>
+                  <span>Preview</span>
+                </button>
+                <button type="button" class="action-chip-btn" data-action="download-file" data-id="${escapeHtml(file.id)}" title="Download">
+                  <i data-lucide="download" width="15" height="15"></i>
+                </button>
+                <button type="button" class="action-chip-btn" data-action="rename-file" data-id="${escapeHtml(file.id)}" title="Rename">
+                  <i data-lucide="pencil" width="15" height="15"></i>
+                </button>
+                <button type="button" class="action-chip-btn danger" data-action="delete-file" data-id="${escapeHtml(file.id)}" title="Delete">
+                  <i data-lucide="trash-2" width="15" height="15"></i>
+                </button>
+              </div>
+            </article>`;
+        }).join('');
+
+        refreshIcons();
+      }
+
+      function renderVideoLinks() {
+        const grid = document.getElementById('videoLinksGrid');
+        const q = state.videoSearch.trim().toLowerCase();
+
+        const filtered = state.videoLinks
+          .filter((v) => {
+            const matchCat = state.videoCategory === 'all' || v.category === state.videoCategory;
+            const matchQ = !q || v.title.toLowerCase().includes(q) || v.url.toLowerCase().includes(q) || (v.description || '').toLowerCase().includes(q);
+            return matchCat && matchQ;
+          })
+          .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+        if (filtered.length === 0) {
+          grid.innerHTML = `
+            <div class="card empty-state" style="grid-column: 1 / -1;">
+              <div class="empty-state-icon"><i data-lucide="play-square" width="22" height="22"></i></div>
+              <div class="empty-state-title">${state.videoLinks.length === 0 ? 'No saved video links' : 'No matching links'}</div>
+              <div class="empty-state-desc">Save YouTube, Facebook, TikTok, or any web video URL with custom titles and categories.</div>
+            </div>`;
+          refreshIcons();
+          return;
+        }
+
+        grid.innerHTML = filtered.map((v) => {
+          const safeHref = isSafeHttpUrl(v.url) ? escapeHtml(v.url) : '#';
+          return `
+            <article class="video-card">
+              <div>
+                <div class="item-meta" style="margin-bottom: 4px;">${escapeHtml(v.platform)} · ${escapeHtml(v.category)} · ${formatDate(v.createdAt)}</div>
+                <div class="item-title" style="white-space: normal; font-size: 1rem; margin-bottom: 6px;">${escapeHtml(v.title)}</div>
+                ${v.description ? `<p class="video-desc">${escapeHtml(v.description)}</p>` : ''}
+                <div class="video-url" style="margin-top: 8px;">${escapeHtml(v.url)}</div>
+              </div>
+              <div class="file-card-actions">
+                <a href="${safeHref}" target="_blank" rel="noopener noreferrer" class="action-chip-btn" style="color: var(--accent-cyan);">
+                  <i data-lucide="external-link" width="15" height="15"></i>
+                  <span>Open Link</span>
+                </a>
+                <button type="button" class="action-chip-btn" data-action="edit-video" data-id="${escapeHtml(v.id)}" title="Edit">
+                  <i data-lucide="pencil" width="15" height="15"></i>
+                </button>
+                <button type="button" class="action-chip-btn danger" data-action="delete-video" data-id="${escapeHtml(v.id)}" title="Delete">
+                  <i data-lucide="trash-2" width="15" height="15"></i>
+                </button>
+              </div>
+            </article>`;
+        }).join('');
+
+        refreshIcons();
+      }
+
+      function renderPasswords() {
+        const grid = document.getElementById('passwordsGrid');
+        const q = state.passwordSearch.trim().toLowerCase();
+
+        const filtered = state.passwords
+          .filter((p) => !q || p.site.toLowerCase().includes(q) || p.username.toLowerCase().includes(q) || (p.notes || '').toLowerCase().includes(q))
+          .sort((a, b) => a.site.localeCompare(b.site));
+
+        if (filtered.length === 0) {
+          grid.innerHTML = `
+            <div class="card empty-state" style="grid-column: 1 / -1;">
+              <div class="empty-state-icon"><i data-lucide="key-round" width="22" height="22"></i></div>
+              <div class="empty-state-title">${state.passwords.length === 0 ? 'No saved passwords' : 'No matching entries'}</div>
+              <div class="empty-state-desc">Store website credentials, generate strong passwords, and copy them with one tap.</div>
+            </div>`;
+          refreshIcons();
+          return;
+        }
+
+        grid.innerHTML = filtered.map((p) => {
+          const isShown = state.revealedPasswords.has(p.id);
+          const masked = '•'.repeat(Math.min(16, Math.max(8, (p.password || '').length)));
+          return `
+            <article class="pw-card">
+              <div class="file-card-head">
+                <div class="item-thumb" style="color: var(--accent-purple);"><i data-lucide="globe" width="18" height="18"></i></div>
+                <div class="item-info">
+                  <div class="item-title">${escapeHtml(p.site)}</div>
+                  <div class="item-meta">Updated ${formatDate(p.updatedAt || p.createdAt)}</div>
+                </div>
+              </div>
+
+              <div class="pw-field-row">
+                <div style="min-width:0;">
+                  <div class="pw-field-label">Username</div>
+                  <div class="pw-field-value">${escapeHtml(p.username)}</div>
+                </div>
+                <button type="button" class="action-chip-btn" data-action="copy-user" data-id="${escapeHtml(p.id)}" title="Copy username">
+                  <i data-lucide="copy" width="15" height="15"></i>
+                </button>
+              </div>
+
+              <div class="pw-field-row">
+                <div style="min-width:0;">
+                  <div class="pw-field-label">Password</div>
+                  <div class="pw-field-value">${isShown ? escapeHtml(p.password) : masked}</div>
+                </div>
+                <div style="display:flex;gap:2px;">
+                  <button type="button" class="action-chip-btn" data-action="toggle-pw" data-id="${escapeHtml(p.id)}" title="${isShown ? 'Hide' : 'Show'} password">
+                    <i data-lucide="${isShown ? 'eye-off' : 'eye'}" width="15" height="15"></i>
+                  </button>
+                  <button type="button" class="action-chip-btn" data-action="copy-pw" data-id="${escapeHtml(p.id)}" title="Copy password">
+                    <i data-lucide="copy" width="15" height="15"></i>
+                  </button>
+                </div>
+              </div>
+
+              ${p.notes ? `<div style="font-size:0.8125rem;color:var(--text-secondary);">${escapeHtml(p.notes)}</div>` : ''}
+
+              <div class="file-card-actions">
+                <button type="button" class="action-chip-btn" data-action="edit-pw" data-id="${escapeHtml(p.id)}" title="Edit">
+                  <i data-lucide="pencil" width="15" height="15"></i>
+                  <span>Edit</span>
+                </button>
+                <button type="button" class="action-chip-btn danger" data-action="delete-pw" data-id="${escapeHtml(p.id)}" title="Delete">
+                  <i data-lucide="trash-2" width="15" height="15"></i>
+                </button>
+              </div>
+            </article>`;
+        }).join('');
+
+        refreshIcons();
+      }
+
+      function renderNotes() {
+        const listEl = document.getElementById('notesList');
+        const q = state.noteSearch.trim().toLowerCase();
+
+        const filtered = state.notes
+          .filter((n) => !q || (n.title || '').toLowerCase().includes(q) || (n.content || '').toLowerCase().includes(q))
+          .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
+
+        if (filtered.length === 0) {
+          listEl.innerHTML = `
+            <div class="empty-state" style="padding: 24px 10px;">
+              <div class="empty-state-title">${state.notes.length === 0 ? 'No notes yet' : 'No matching notes'}</div>
+              <div class="empty-state-desc">Tap New Note to start writing.</div>
+            </div>`;
+        } else {
+          listEl.innerHTML = filtered.map((n) => {
+            const active = n.id === state.activeNoteId ? 'active' : '';
+            const preview = (n.content || '').trim().slice(0, 64) || 'Empty note';
+            return `
+              <button type="button" class="note-list-item ${active}" data-action="select-note" data-id="${escapeHtml(n.id)}">
+                <div class="item-title" style="font-size: 0.9375rem;">${escapeHtml(n.title || 'Untitled Note')}</div>
+                <div class="item-meta" style="margin-top: 2px;">${escapeHtml(preview)}</div>
+                <div class="item-meta" style="font-size: 0.75rem; margin-top: 4px;">${formatDate(n.updatedAt || n.createdAt)}</div>
+              </button>`;
+          }).join('');
+        }
+
+        const activeNote = state.notes.find((n) => n.id === state.activeNoteId);
+        const titleInput = document.getElementById('noteTitleInput');
+        const bodyInput = document.getElementById('noteBodyInput');
+        const statusEl = document.getElementById('noteSaveStatus');
+        const delBtn = document.getElementById('deleteActiveNoteBtn');
+
+        if (activeNote) {
+          titleInput.disabled = false;
+          bodyInput.disabled = false;
+          if (document.activeElement !== titleInput) titleInput.value = activeNote.title || '';
+          if (document.activeElement !== bodyInput) bodyInput.value = activeNote.content || '';
+          statusEl.textContent = `Saved automatically · ${formatTime(activeNote.updatedAt || activeNote.createdAt)}`;
+          delBtn.style.display = 'inline-flex';
+        } else {
+          titleInput.value = '';
+          bodyInput.value = '';
+          titleInput.disabled = true;
+          bodyInput.disabled = true;
+          statusEl.textContent = state.notes.length ? 'Select a note to edit' : 'Create a note to begin';
+          delBtn.style.display = 'none';
+        }
+
+        refreshIcons();
+      }
+
+      async function updateStorageInfo() {
+        const totalFileBytes = state.files.reduce((sum, f) => sum + (Number(f.size) || 0), 0);
+        document.getElementById('settingsVaultSize').textContent = formatBytes(totalFileBytes);
+        document.getElementById('settingsRecordsSummary').textContent =
+          `${state.files.length} files · ${state.videoLinks.length} links · ${state.passwords.length} passwords · ${state.notes.length} notes`;
+
+        const sidebarText = document.getElementById('sidebarStorageText');
+        const sidebarBar = document.getElementById('sidebarStorageBar');
+        const quotaDetail = document.getElementById('settingsQuotaDetail');
+        const quotaPercent = document.getElementById('settingsQuotaPercent');
+        const quotaBar = document.getElementById('settingsQuotaBar');
+
+        if (navigator.storage && typeof navigator.storage.estimate === 'function') {
+          try {
+            const est = await navigator.storage.estimate();
+            const usage = est.usage || totalFileBytes;
+            const quota = est.quota || 0;
+            const pct = quota > 0 ? Math.min(100, Math.max(usage > 0 ? 1 : 0, (usage / quota) * 100)) : 0;
+
+            sidebarText.textContent = quota > 0 ? `${formatBytes(usage)} / ${formatBytes(quota)}` : formatBytes(usage);
+            sidebarBar.style.width = `${pct.toFixed(1)}%`;
+
+            quotaDetail.textContent = quota > 0
+              ? `${formatBytes(usage)} used of ${formatBytes(quota)} available`
+              : `${formatBytes(usage)} used on this origin`;
+            quotaPercent.textContent = quota > 0 ? `${pct.toFixed(1)}%` : 'Supported';
+            quotaBar.style.width = `${pct.toFixed(1)}%`;
+            return;
+          } catch {
+            // Fallback below
+          }
+        }
+
+        sidebarText.textContent = formatBytes(totalFileBytes);
+        sidebarBar.style.width = totalFileBytes > 0 ? '15%' : '0%';
+        quotaDetail.textContent = 'Storage estimate API not reported by this browser';
+        quotaPercent.textContent = 'Local';
+      }
+
+      function renderAll() {
+        renderCounts();
+        renderDashboard();
+        renderFiles();
+        renderVideoLinks();
+        renderPasswords();
+        renderNotes();
+      }
+
+      /* =========================================================
+         8. FEATURE ACTIONS
+      ========================================================= */
+      async function loadVaultData() {
+        try {
+          const [files, videoLinks, passwords, notes] = await Promise.all([
+            dbGetAll('files'),
+            dbGetAll('videoLinks'),
+            dbGetAll('passwords'),
+            dbGetAll('notes')
+          ]);
+          state.files = files;
+          state.videoLinks = videoLinks;
+          state.passwords = passwords;
+          state.notes = notes;
+
+          if (!state.activeNoteId && notes.length > 0) {
+            const latest = [...notes].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0];
+            state.activeNoteId = latest.id;
+          }
+          renderAll();
+        } catch (err) {
+          handleStorageError(err, 'load vault data');
+        }
+      }
+
+      // Files
+      async function handleFileUpload(fileList) {
+        if (!fileList || fileList.length === 0) return;
+        let added = 0;
+        for (const file of Array.from(fileList)) {
+          const record = {
+            id: generateId('file'),
+            name: file.name || 'Untitled File',
+            category: detectFileCategory(file),
+            mimeType: file.type || 'application/octet-stream',
+            size: file.size || 0,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            blob: file
+          };
+          try {
+            await dbPut('files', record);
+            state.files.push(record);
+            added++;
+          } catch (err) {
+            handleStorageError(err, `save "${file.name}"`);
+            break;
+          }
+        }
+        if (added > 0) {
+          showToast(`Saved ${added} file${added === 1 ? '' : 's'} to MyVault`, 'success');
+          renderAll();
+        }
+      }
+
+      function downloadFileRecord(file) {
+        if (!file || !file.blob) return;
+        const url = URL.createObjectURL(file.blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = file.name || 'download';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 2500);
+      }
+
+      async function openFilePreview(file) {
+        if (!file || !file.blob) return;
+        if (state.previewObjectUrl) {
+          URL.revokeObjectURL(state.previewObjectUrl);
+          state.previewObjectUrl = null;
+        }
+        state.previewFile = file;
+        document.getElementById('previewModalTitle').textContent = file.name;
+        document.getElementById('previewMeta').textContent =
+          `${FILE_CATEGORIES[file.category] || 'File'} · ${formatBytes(file.size)} · ${file.mimeType || 'Unknown type'} · Added ${formatDate(file.createdAt)}`;
+
+        const container = document.getElementById('previewContainer');
+        container.innerHTML = '';
+
+        const mime = (file.mimeType || '').toLowerCase();
+        const ext = (file.name || '').toLowerCase().split('.').pop();
+        const url = URL.createObjectURL(file.blob);
+        state.previewObjectUrl = url;
+
+        if (mime.startsWith('image/') || ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'avif'].includes(ext)) {
+          const img = document.createElement('img');
+          img.src = url;
+          img.alt = file.name;
+          container.appendChild(img);
+        } else if (mime.startsWith('video/') || ['mp4', 'webm', 'mov', 'm4v'].includes(ext)) {
+          const video = document.createElement('video');
+          video.src = url;
+          video.controls = true;
+          video.playsInline = true;
+          container.appendChild(video);
+        } else if (mime.startsWith('audio/') || ['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac'].includes(ext)) {
+          const wrap = document.createElement('div');
+          wrap.style.cssText = 'width: 100%; max-width: 440px; text-align: center; padding: 24px 12px;';
+          const title = document.createElement('div');
+          title.textContent = file.name;
+          title.style.cssText = 'font-weight: 600; margin-bottom: 14px;';
+          const audio = document.createElement('audio');
+          audio.src = url;
+          audio.controls = true;
+          audio.style.width = '100%';
+          wrap.appendChild(title);
+          wrap.appendChild(audio);
+          container.appendChild(wrap);
+        } else if (mime === 'application/pdf' || ext === 'pdf') {
+          const iframe = document.createElement('iframe');
+          iframe.src = url;
+          iframe.title = file.name;
+          container.appendChild(iframe);
+        } else if (mime.startsWith('text/') || ['txt', 'md', 'json', 'csv', 'log', 'xml', 'html', 'css', 'js'].includes(ext)) {
+          const pre = document.createElement('pre');
+          pre.className = 'preview-text';
+          try {
+            const slice = file.blob.slice(0, 262144);
+            const text = await slice.text();
+            pre.textContent = file.size > 262144 ? `${text}\n\n[Preview truncated at 256 KB — download to view full file]` : text;
+          } catch {
+            pre.textContent = 'Unable to read text preview for this file.';
+          }
+          container.appendChild(pre);
+        } else {
+          const box = document.createElement('div');
+          box.className = 'empty-state';
+          const title = document.createElement('div');
+          title.className = 'empty-state-title';
+          title.textContent = 'Preview unavailable for this file format';
+          const desc = document.createElement('div');
+          desc.className = 'empty-state-desc';
+          desc.textContent = 'Use the Download button below to open it on your device.';
+          box.appendChild(title);
+          box.appendChild(desc);
+          container.appendChild(box);
+        }
+
+        openModal('previewModal');
+      }
+
+      // Copy utility
+      async function copyText(text, label) {
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(text);
+          } else {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            ta.remove();
+          }
+          showToast(`${label} copied to clipboard`, 'success');
+        } catch {
+          showToast(`Unable to copy ${label.toLowerCase()}`, 'error');
+        }
+      }
+
+      function generateStrongPassword(length = 16) {
+        const charset = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*-_+=';
+        const arr = new Uint32Array(length);
+        crypto.getRandomValues(arr);
+        let out = '';
+        for (let i = 0; i < length; i++) {
+          out += charset[arr[i] % charset.length];
+        }
+        return out;
+      }
+
+      // Notes auto-save
+      async function createNewNote() {
+        const now = Date.now();
+        const note = {
+          id: generateId('note'),
+          title: '',
+          content: '',
+          createdAt: now,
+          updatedAt: now
+        };
+        try {
+          await dbPut('notes', note);
+          state.notes.unshift(note);
+          state.activeNoteId = note.id;
+          renderAll();
+          if (window.innerWidth < 768) {
+            document.getElementById('noteEditorPane').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+          }
+          document.getElementById('noteTitleInput').focus();
+        } catch (err) {
+          handleStorageError(err, 'create note');
+        }
+      }
+
+      function scheduleNoteAutosave() {
+        const note = state.notes.find((n) => n.id === state.activeNoteId);
+        if (!note) return;
+        note.title = document.getElementById('noteTitleInput').value;
+        note.content = document.getElementById('noteBodyInput').value;
+        note.updatedAt = Date.now();
+        document.getElementById('noteSaveStatus').textContent = 'Saving...';
+
+        clearTimeout(state.noteSaveTimer);
+        state.noteSaveTimer = setTimeout(async () => {
+          try {
+            await dbPut('notes', note);
+            document.getElementById('noteSaveStatus').textContent = `Saved automatically · ${formatTime(note.updatedAt)}`;
+            renderNotes();
+            renderDashboard();
+          } catch (err) {
+            handleStorageError(err, 'auto-save note');
+          }
+        }, 350);
+      }
+
+      /* =========================================================
+         9. BACKUP EXPORT & IMPORT (Chunked Base64 in JSON file, NEVER LocalStorage)
+      ========================================================= */
+      function blobToBase64(blob) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const res = String(reader.result || '');
+            const idx = res.indexOf(',');
+            resolve(idx >= 0 ? res.slice(idx + 1) : res);
+          };
+          reader.onerror = () => reject(reader.error || new Error('Failed to read file blob'));
+          reader.readAsDataURL(blob);
+        });
+      }
+
+      function base64ToBlob(b64, mimeType) {
+        const binStr = atob(b64);
+        const len = binStr.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) {
+          bytes[i] = binStr.charCodeAt(i);
+        }
+        return new Blob([bytes], { type: mimeType || 'application/octet-stream' });
+      }
+
+      async function exportBackup() {
+        const btn = document.getElementById('exportBackupBtn');
+        btn.disabled = true;
+        showToast('Preparing backup archive...', 'info');
+        try {
+          const encodedFiles = [];
+          for (const f of state.files) {
+            const base64 = f.blob ? await blobToBase64(f.blob) : '';
+            encodedFiles.push({
+              id: f.id,
+              name: f.name,
+              category: f.category,
+              mimeType: f.mimeType,
+              size: f.size,
+              createdAt: f.createdAt,
+              updatedAt: f.updatedAt,
+              base64
+            });
+          }
+
+          const payload = {
+            app: 'MyVault',
+            version: 1,
+            exportedAt: new Date().toISOString(),
+            prefs: state.prefs,
+            files: encodedFiles,
+            videoLinks: state.videoLinks,
+            passwords: state.passwords,
+            notes: state.notes
+          };
+
+          const jsonBlob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+          const url = URL.createObjectURL(jsonBlob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `myvault-backup-${new Date().toISOString().slice(0, 10)}.json`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 3000);
+          showToast('Backup exported successfully', 'success');
+        } catch (err) {
+          showToast(`Backup export failed: ${err?.message || 'Memory or file error'}`, 'error');
+        } finally {
+          btn.disabled = false;
+        }
+      }
+
+      async function importBackup(file) {
+        if (!file) return;
+        try {
+          const text = await file.text();
+          const data = JSON.parse(text);
+          if (!data || data.app !== 'MyVault') {
+            showToast('Invalid MyVault backup file', 'error');
+            return;
+          }
+
+          if (Array.isArray(data.files)) {
+            for (const f of data.files) {
+              const blob = f.base64 ? base64ToBlob(f.base64, f.mimeType) : new Blob([]);
+              await dbPut('files', {
+                id: f.id || generateId('file'),
+                name: f.name || 'Restored File',
+                category: f.category || 'other',
+                mimeType: f.mimeType || 'application/octet-stream',
+                size: f.size || blob.size,
+                createdAt: f.createdAt || Date.now(),
+                updatedAt: f.updatedAt || Date.now(),
+                blob
+              });
+            }
+          }
+          if (Array.isArray(data.videoLinks)) {
+            for (const v of data.videoLinks) {
+              if (v && v.url && isSafeHttpUrl(v.url)) {
+                await dbPut('videoLinks', v);
+              }
+            }
+          }
+          if (Array.isArray(data.passwords)) {
+            for (const p of data.passwords) {
+              if (p && p.site) await dbPut('passwords', p);
+            }
+          }
+          if (Array.isArray(data.notes)) {
+            for (const n of data.notes) {
+              if (n && n.id) await dbPut('notes', n);
+            }
+          }
+          if (data.prefs && typeof data.prefs === 'object') {
+            state.prefs = { ...defaultPrefs, ...data.prefs };
+            savePrefs(state.prefs);
+            applyPrefs();
+          }
+
+          revokeAllThumbUrls();
+          await loadVaultData();
+          showToast('Backup restored successfully', 'success');
+        } catch (err) {
+          handleStorageError(err, 'import backup');
+        }
+      }
+
+      async function clearAllVaultData() {
+        try {
+          await Promise.all([
+            dbClearStore('files'),
+            dbClearStore('videoLinks'),
+            dbClearStore('passwords'),
+            dbClearStore('notes')
+          ]);
+          revokeAllThumbUrls();
+          state.files = [];
+          state.videoLinks = [];
+          state.passwords = [];
+          state.notes = [];
+          state.activeNoteId = null;
+          state.revealedPasswords.clear();
+          renderAll();
+          showToast('All MyVault data cleared', 'success');
+        } catch (err) {
+          handleStorageError(err, 'clear all data');
+        }
+      }
+
+      function applyPrefs() {
+        document.documentElement.setAttribute('data-accent', state.prefs.accent || 'blue');
+        document.getElementById('prefAccentSelect').value = state.prefs.accent || 'blue';
+        document.getElementById('prefDefaultSort').value = state.prefs.defaultSort || 'date-desc';
+        document.getElementById('fileSortSelect').value = state.fileSort || state.prefs.defaultSort || 'date-desc';
+      }
+
+      /* =========================================================
+         10. EVENT WIRING
+      ========================================================= */
+      function bindEvents() {
+        // Navigation buttons (sidebar, mobile bottom nav, mobile settings, dashboard open)
+        document.body.addEventListener('click', (e) => {
+          const navBtn = e.target.closest('[data-nav]');
+          if (navBtn) {
+            switchView(navBtn.dataset.nav);
+            return;
+          }
+
+          const closeBtn = e.target.closest('[data-close-modal]');
+          if (closeBtn) {
+            closeModal(closeBtn.dataset.closeModal);
+            return;
+          }
+
+          // Click outside modal panel to close
+          if (e.target.classList.contains('modal-backdrop')) {
+            closeModal(e.target.id);
+            return;
+          }
+
+          const actionEl = e.target.closest('[data-action]');
+          if (!actionEl) return;
+          const action = actionEl.dataset.action;
+          const id = actionEl.dataset.id;
+
+          if (action === 'preview-file') {
+            const file = state.files.find((f) => f.id === id);
+            if (file) openFilePreview(file);
+          } else if (action === 'download-file') {
+            const file = state.files.find((f) => f.id === id);
+            if (file) downloadFileRecord(file);
+          } else if (action === 'rename-file') {
+            const file = state.files.find((f) => f.id === id);
+            if (!file) return;
+            state.renamingFileId = id;
+            document.getElementById('renameFileInput').value = file.name;
+            document.getElementById('renameCategorySelect').value = file.category || 'other';
+            openModal('renameModal');
+          } else if (action === 'delete-file') {
+            const file = state.files.find((f) => f.id === id);
+            if (!file) return;
+            openConfirm({
+              title: 'Delete File',
+              message: `Permanently delete "${file.name}" from your local vault?`,
+              confirmLabel: 'Delete File',
+              onConfirm: async () => {
+                await dbDelete('files', id);
+                if (state.thumbUrls.has(id)) {
+                  URL.revokeObjectURL(state.thumbUrls.get(id));
+                  state.thumbUrls.delete(id);
+                }
+                state.files = state.files.filter((f) => f.id !== id);
+                renderAll();
+                showToast('File deleted', 'info');
+              }
+            });
+          } else if (action === 'edit-video') {
+            const v = state.videoLinks.find((item) => item.id === id);
+            if (!v) return;
+            state.editingVideoId = id;
+            document.getElementById('videoModalTitle').textContent = 'Edit Video Link';
+            document.getElementById('videoUrlInput').value = v.url;
+            document.getElementById('videoTitleInput').value = v.title;
+            document.getElementById('videoCategoryInput').value = v.category;
+            document.getElementById('videoDescInput').value = v.description || '';
+            openModal('videoModal');
+          } else if (action === 'delete-video') {
+            const v = state.videoLinks.find((item) => item.id === id);
+            if (!v) return;
+            openConfirm({
+              title: 'Delete Video Link',
+              message: `Remove "${v.title}" from your saved links?`,
+              confirmLabel: 'Delete Link',
+              onConfirm: async () => {
+                await dbDelete('videoLinks', id);
+                state.videoLinks = state.videoLinks.filter((item) => item.id !== id);
+                renderAll();
+                showToast('Video link deleted', 'info');
+              }
+            });
+          } else if (action === 'toggle-pw') {
+            if (state.revealedPasswords.has(id)) state.revealedPasswords.delete(id);
+            else state.revealedPasswords.add(id);
+            renderPasswords();
+          } else if (action === 'copy-pw') {
+            const p = state.passwords.find((item) => item.id === id);
+            if (p) copyText(p.password, 'Password');
+          } else if (action === 'copy-user') {
+            const p = state.passwords.find((item) => item.id === id);
+            if (p) copyText(p.username, 'Username');
+          } else if (action === 'edit-pw') {
+            const p = state.passwords.find((item) => item.id === id);
+            if (!p) return;
+            state.editingPasswordId = id;
+            document.getElementById('passwordModalTitle').textContent = 'Edit Password Entry';
+            document.getElementById('pwSiteInput').value = p.site;
+            document.getElementById('pwUsernameInput').value = p.username;
+            document.getElementById('pwSecretInput').value = p.password;
+            document.getElementById('pwNotesInput').value = p.notes || '';
+            openModal('passwordModal');
+          } else if (action === 'delete-pw') {
+            const p = state.passwords.find((item) => item.id === id);
+            if (!p) return;
+            openConfirm({
+              title: 'Delete Password Entry',
+              message: `Delete credentials for "${p.site}"?`,
+              confirmLabel: 'Delete Entry',
+              onConfirm: async () => {
+                await dbDelete('passwords', id);
+                state.passwords = state.passwords.filter((item) => item.id !== id);
+                state.revealedPasswords.delete(id);
+                renderAll();
+                showToast('Password entry deleted', 'info');
+              }
+            });
+          } else if (action === 'select-note') {
+            state.activeNoteId = id;
+            renderNotes();
+            if (window.innerWidth < 768) {
+              document.getElementById('noteEditorPane').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            }
+          } else if (action === 'open-note') {
+            state.activeNoteId = id;
+            switchView('notes');
+            renderNotes();
+            if (window.innerWidth < 768) {
+              document.getElementById('noteEditorPane').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            }
+          }
+        });
+
+        // Quick Action & Header Buttons
+        const hiddenInput = document.getElementById('hiddenFileInput');
+        document.getElementById('headerQuickUploadBtn').addEventListener('click', () => {
+          switchView('files');
+          hiddenInput.click();
+        });
+        document.getElementById('fileUploadBtn').addEventListener('click', () => hiddenInput.click());
+        document.getElementById('qaUploadFile').addEventListener('click', () => {
+          switchView('files');
+          hiddenInput.click();
+        });
+        document.getElementById('qaAddVideo').addEventListener('click', () => {
+          switchView('videos');
+          document.getElementById('addVideoLinkBtn').click();
+        });
+        document.getElementById('qaAddPassword').addEventListener('click', () => {
+          switchView('passwords');
+          document.getElementById('addPasswordBtn').click();
+        });
+        document.getElementById('qaNewNote').addEventListener('click', () => {
+          switchView('notes');
+          createNewNote();
+        });
+
+        hiddenInput.addEventListener('change', (e) => {
+          handleFileUpload(e.target.files);
+          e.target.value = '';
+        });
+
+        // Dropzone
+        const dropzone = document.getElementById('fileDropzone');
+        dropzone.addEventListener('click', () => hiddenInput.click());
+        dropzone.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            hiddenInput.click();
+          }
+        });
+        dropzone.addEventListener('dragover', (e) => {
+          e.preventDefault();
+          dropzone.classList.add('dragover');
+        });
+        dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+        dropzone.addEventListener('drop', (e) => {
+          e.preventDefault();
+          dropzone.classList.remove('dragover');
+          if (e.dataTransfer && e.dataTransfer.files) {
+            handleFileUpload(e.dataTransfer.files);
+          }
+        });
+
+        // File Category Tabs, Search & Sort
+        document.getElementById('fileCategoryTabs').addEventListener('click', (e) => {
+          const btn = e.target.closest('[data-cat]');
+          if (!btn) return;
+          state.fileCategory = btn.dataset.cat;
+          document.querySelectorAll('#fileCategoryTabs .seg-tab').forEach((t) => t.classList.remove('active'));
+          btn.classList.add('active');
+          renderFiles();
+        });
+
+        document.getElementById('fileSearchInput').addEventListener('input', (e) => {
+          state.fileSearch = e.target.value;
+          renderFiles();
+        });
+
+        document.getElementById('fileSortSelect').addEventListener('change', (e) => {
+          state.fileSort = e.target.value;
+          renderFiles();
+        });
+
+        // Preview download
+        document.getElementById('previewDownloadBtn').addEventListener('click', () => {
+          if (state.previewFile) downloadFileRecord(state.previewFile);
+        });
+
+        // Rename form
+        document.getElementById('renameForm').addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const file = state.files.find((f) => f.id === state.renamingFileId);
+          if (!file) return;
+          const newName = document.getElementById('renameFileInput').value.trim();
+          if (!newName) return;
+          file.name = newName;
+          file.category = document.getElementById('renameCategorySelect').value;
+          file.updatedAt = Date.now();
+          try {
+            await dbPut('files', file);
+            closeModal('renameModal');
+            renderAll();
+            showToast('File updated', 'success');
+          } catch (err) {
+            handleStorageError(err, 'rename file');
+          }
+        });
+
+        // Video Links
+        document.getElementById('addVideoLinkBtn').addEventListener('click', () => {
+          state.editingVideoId = null;
+          document.getElementById('videoModalTitle').textContent = 'Save Video Link';
+          document.getElementById('videoForm').reset();
+          openModal('videoModal');
+        });
+
+        document.getElementById('videoForm').addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const url = document.getElementById('videoUrlInput').value.trim();
+          const title = document.getElementById('videoTitleInput').value.trim();
+          const category = document.getElementById('videoCategoryInput').value;
+          const description = document.getElementById('videoDescInput').value.trim();
+
+          if (!isSafeHttpUrl(url)) {
+            showToast('Please enter a valid http:// or https:// URL', 'error');
+            return;
+          }
+
+          const now = Date.now();
+          const existing = state.editingVideoId ? state.videoLinks.find((v) => v.id === state.editingVideoId) : null;
+          const record = {
+            id: existing ? existing.id : generateId('vid'),
+            url,
+            title,
+            category,
+            description,
+            platform: detectVideoPlatform(url),
+            createdAt: existing ? existing.createdAt : now,
+            updatedAt: now
+          };
+
+          try {
+            await dbPut('videoLinks', record);
+            if (existing) {
+              Object.assign(existing, record);
+            } else {
+              state.videoLinks.unshift(record);
+            }
+            closeModal('videoModal');
+            renderAll();
+            showToast(existing ? 'Video link updated' : 'Video link saved', 'success');
+          } catch (err) {
+            handleStorageError(err, 'save video link');
+          }
+        });
+
+        document.getElementById('videoCategoryTabs').addEventListener('click', (e) => {
+          const btn = e.target.closest('[data-vcat]');
+          if (!btn) return;
+          state.videoCategory = btn.dataset.vcat;
+          document.querySelectorAll('#videoCategoryTabs .seg-tab').forEach((t) => t.classList.remove('active'));
+          btn.classList.add('active');
+          renderVideoLinks();
+        });
+
+        document.getElementById('videoSearchInput').addEventListener('input', (e) => {
+          state.videoSearch = e.target.value;
+          renderVideoLinks();
+        });
+
+        // Passwords
+        document.getElementById('addPasswordBtn').addEventListener('click', () => {
+          state.editingPasswordId = null;
+          document.getElementById('passwordModalTitle').textContent = 'Add Password Entry';
+          document.getElementById('passwordForm').reset();
+          openModal('passwordModal');
+        });
+
+        document.getElementById('generatePwBtn').addEventListener('click', () => {
+          document.getElementById('pwSecretInput').value = generateStrongPassword(16);
+        });
+
+        document.getElementById('passwordForm').addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const site = document.getElementById('pwSiteInput').value.trim();
+          const username = document.getElementById('pwUsernameInput').value.trim();
+          const password = document.getElementById('pwSecretInput').value;
+          const notes = document.getElementById('pwNotesInput').value.trim();
+
+          const now = Date.now();
+          const existing = state.editingPasswordId ? state.passwords.find((p) => p.id === state.editingPasswordId) : null;
+          const record = {
+            id: existing ? existing.id : generateId('pw'),
+            site,
+            username,
+            password,
+            notes,
+            createdAt: existing ? existing.createdAt : now,
+            updatedAt: now
+          };
+
+          try {
+            await dbPut('passwords', record);
+            if (existing) {
+              Object.assign(existing, record);
+            } else {
+              state.passwords.push(record);
+            }
+            closeModal('passwordModal');
+            renderAll();
+            showToast(existing ? 'Password updated' : 'Password saved', 'success');
+          } catch (err) {
+            handleStorageError(err, 'save password');
+          }
+        });
+
+        document.getElementById('passwordSearchInput').addEventListener('input', (e) => {
+          state.passwordSearch = e.target.value;
+          renderPasswords();
+        });
+
+        // Notes
+        document.getElementById('newNoteBtn').addEventListener('click', createNewNote);
+        document.getElementById('noteSearchInput').addEventListener('input', (e) => {
+          state.noteSearch = e.target.value;
+          renderNotes();
+        });
+        document.getElementById('noteTitleInput').addEventListener('input', scheduleNoteAutosave);
+        document.getElementById('noteBodyInput').addEventListener('input', scheduleNoteAutosave);
+        document.getElementById('deleteActiveNoteBtn').addEventListener('click', () => {
+          const note = state.notes.find((n) => n.id === state.activeNoteId);
+          if (!note) return;
+          openConfirm({
+            title: 'Delete Note',
+            message: `Delete "${note.title || 'Untitled Note'}" permanently?`,
+            confirmLabel: 'Delete Note',
+            onConfirm: async () => {
+              await dbDelete('notes', note.id);
+              state.notes = state.notes.filter((n) => n.id !== note.id);
+              state.activeNoteId = state.notes[0]?.id || null;
+              renderAll();
+              showToast('Note deleted', 'info');
+            }
+          });
+        });
+
+        // Global Search
+        const globalWrap = document.getElementById('globalSearchWrap');
+        const globalInput = document.getElementById('globalSearchInput');
+        const closeMobileSearchBtn = document.getElementById('closeMobileSearch');
+
+        document.getElementById('mobileSearchToggle').addEventListener('click', () => {
+          globalWrap.classList.add('open');
+          closeMobileSearchBtn.style.display = 'inline-flex';
+          globalInput.focus();
+        });
+
+        closeMobileSearchBtn.addEventListener('click', () => {
+          globalWrap.classList.remove('open');
+          closeMobileSearchBtn.style.display = 'none';
+          globalInput.value = '';
+          renderGlobalSearch('');
+        });
+
+        globalInput.addEventListener('input', (e) => {
+          renderGlobalSearch(e.target.value);
+        });
+
+        document.getElementById('clearGlobalSearchBtn').addEventListener('click', () => {
+          globalInput.value = '';
+          globalWrap.classList.remove('open');
+          closeMobileSearchBtn.style.display = 'none';
+          renderGlobalSearch('');
+        });
+
+        // Settings
+        document.getElementById('prefAccentSelect').addEventListener('change', (e) => {
+          state.prefs.accent = e.target.value;
+          savePrefs(state.prefs);
+          applyPrefs();
+          showToast('Accent preference saved', 'success');
+        });
+
+        document.getElementById('prefDefaultSort').addEventListener('change', (e) => {
+          state.prefs.defaultSort = e.target.value;
+          state.fileSort = e.target.value;
+          savePrefs(state.prefs);
+          applyPrefs();
+          renderFiles();
+          showToast('Default sort saved', 'success');
+        });
+
+        document.getElementById('exportBackupBtn').addEventListener('click', exportBackup);
+        document.getElementById('importBackupBtn').addEventListener('click', () => {
+          document.getElementById('importBackupInput').click();
+        });
+        document.getElementById('importBackupInput').addEventListener('change', (e) => {
+          if (e.target.files && e.target.files[0]) {
+            importBackup(e.target.files[0]);
+          }
+          e.target.value = '';
+        });
+
+        document.getElementById('clearAllDataBtn').addEventListener('click', () => {
+          openConfirm({
+            title: 'Clear All Vault Data',
+            message: 'This will permanently erase all saved files, video links, passwords, and notes in this browser. Export a backup first if needed.',
+            confirmLabel: 'Erase Everything',
+            requireClearText: true,
+            onConfirm: clearAllVaultData
+          });
+        });
+
+        // Confirm modal execution
+        document.getElementById('confirmExecuteBtn').addEventListener('click', async () => {
+          if (state.confirmRequireText) {
+            const val = document.getElementById('confirmTypeInput').value.trim();
+            if (val !== 'CLEAR') {
+              showToast('Please type CLEAR to confirm', 'warning');
+              return;
+            }
+          }
+          const fn = state.confirmHandler;
+          closeModal('confirmModal');
+          if (typeof fn === 'function') await fn();
+        });
+
+        // Escape closes active modals
+        document.addEventListener('keydown', (e) => {
+          if (e.key === 'Escape') {
+            document.querySelectorAll('.modal-backdrop.open').forEach((m) => closeModal(m.id));
+          }
+        });
+      }
+
+      /* =========================================================
+         11. BOOTSTRAP
+      ========================================================= */
+      async function init() {
+        applyPrefs();
+        bindEvents();
+        switchView(state.prefs.lastView || 'dashboard');
+        await loadVaultData();
+        refreshIcons();
+      }
+
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+      } else {
+        init();
+      }
+    })();
+  </script>
+</body>
+</html>
